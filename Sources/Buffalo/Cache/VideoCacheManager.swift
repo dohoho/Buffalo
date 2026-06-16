@@ -4,7 +4,7 @@ public actor VideoCacheManager {
     public static let shared = VideoCacheManager()
 
     private let diskCache: DiskCache
-    private let downloader: any VideoDownloading
+    private let downloadManager: VideoDownloadManager
 
     private init() {
         let dir = FileManager.default
@@ -12,17 +12,32 @@ public actor VideoCacheManager {
             .appendingPathComponent("Buffalo", isDirectory: true)
         // Safe: Caches directory always exists on all Apple platforms.
         diskCache = try! DiskCache(directory: dir)
-        downloader = VideoDownloadTask()
+        downloadManager = VideoDownloadManager(
+            downloader: VideoDownloadTask(),
+            diskCache: diskCache
+        )
     }
 
-    init(directory: URL, downloader: any VideoDownloading = VideoDownloadTask()) throws {
+    init(
+        directory: URL,
+        downloader: any VideoDownloading = VideoDownloadTask(),
+        maxConcurrent: Int = 4
+    ) throws {
         diskCache = try DiskCache(directory: directory)
-        self.downloader = downloader
+        downloadManager = VideoDownloadManager(
+            maxConcurrent: maxConcurrent,
+            downloader: downloader,
+            diskCache: diskCache
+        )
     }
 
     /// Returns a local file URL for the video, downloading it if not already cached.
     @discardableResult
-    public func video(from url: URL, options: CacheOptions = .default) async throws -> URL {
+    public func video(
+        from url: URL,
+        options: CacheOptions = .default,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> URL {
         let key = CacheKey(url: url)
         let ext = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
 
@@ -31,8 +46,21 @@ public actor VideoCacheManager {
             return cached
         }
 
-        let tempURL = try await downloader.download(from: url)
-        return try await diskCache.store(movingFrom: tempURL, forKey: key, fileExtension: ext)
+        return try await downloadManager.fetch(
+            key: key,
+            url: url,
+            fileExtension: ext,
+            progress: progress
+        )
+    }
+
+    public func cancel(url: URL) async {
+        let key = CacheKey(url: url)
+        await downloadManager.cancel(key: key)
+    }
+
+    public func cancelAll() async {
+        await downloadManager.cancelAll()
     }
 
     public func isCached(url: URL) async -> Bool {

@@ -8,4 +8,8 @@ public struct CacheKey: Hashable, Sendable {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         value = digest.map { String(format: "%02x", $0) }.joined()
     }
+
+    public init(string: String) {
+        value = string
+    }
 }
