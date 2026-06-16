@@ -14,7 +14,6 @@ struct TestVideo: Identifiable, Sendable {
     let name: String
     let url: URL
 
-    // Public domain videos — W3Schools & Blender Foundation open movies
     static let samples: [TestVideo] = [
         TestVideo(
             name: "W3Schools · mov_bbb (~1MB)",
@@ -41,32 +40,57 @@ struct TestVideo: Identifiable, Sendable {
 @Observable
 final class CacheTestViewModel {
 
+    enum CacheSource {
+        case memory, disk, network
+
+        var label: String {
+            switch self {
+            case .memory:  return "Memory hit"
+            case .disk:    return "Disk hit"
+            case .network: return "Downloaded"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .memory:  return "memorychip"
+            case .disk:    return "internaldrive"
+            case .network: return "arrow.down.circle"
+            }
+        }
+    }
+
     enum Status {
         case idle
-        case downloading
-        case cached(url: URL, size: String)
+        case downloading(progress: Double)
+        case cached(url: URL, size: String, source: CacheSource)
         case failed(String)
 
         var label: String {
             switch self {
-            case .idle:                return "Not cached"
-            case .downloading:         return "Downloading…"
-            case .cached(_, let size): return "Cached · \(size)"
-            case .failed(let msg):     return msg
+            case .idle:                           return "Not cached"
+            case .downloading(let p):             return p > 0 ? "Downloading \(Int(p * 100))%" : "Downloading…"
+            case .cached(_, let size, let src):   return "\(src.label) · \(size)"
+            case .failed(let msg):                return msg
             }
         }
 
         var color: Color {
             switch self {
-            case .idle:        return .secondary
-            case .downloading: return .orange
-            case .cached:      return .green
-            case .failed:      return .red
+            case .idle:                     return .secondary
+            case .downloading:              return .orange
+            case .cached(_, _, let src):
+                switch src {
+                case .memory:  return .purple
+                case .disk:    return .blue
+                case .network: return .green
+                }
+            case .failed: return .red
             }
         }
 
         var cachedURL: URL? {
-            guard case .cached(let url, _) = self else { return nil }
+            guard case .cached(let url, _, _) = self else { return nil }
             return url
         }
 
@@ -74,10 +98,16 @@ final class CacheTestViewModel {
             guard case .idle = self else { return false }
             return true
         }
+
+        var downloadProgress: Double? {
+            guard case .downloading(let p) = self else { return nil }
+            return p
+        }
     }
 
     private(set) var statuses: [UUID: Status] = [:]
     private(set) var logs: [String] = []
+    private(set) var diskCacheSize: String = "—"
     var isClearing = false
 
     func status(for video: TestVideo) -> Status {
@@ -88,34 +118,24 @@ final class CacheTestViewModel {
 
     func download(_ video: TestVideo) {
         guard status(for: video).isIdle else { return }
-        set(.downloading, for: video)
+        set(.downloading(progress: 0), for: video)
         Task {
             let start = Date()
             do {
-                let wasCached = await VideoCacheManager.shared.isCached(url: video.url)
-                let localURL  = try await VideoCacheManager.shared.video(from: video.url)
-                let elapsed   = Date().timeIntervalSince(start)
-                let size      = fileSize(at: localURL)
-                set(.cached(url: localURL, size: size), for: video)
-                let source = wasCached ? "CACHE HIT" : "downloaded"
-                append("✅ \(video.name) — \(source) in \(String(format: "%.2f", elapsed))s (\(size))")
-            } catch {
-                set(.failed(error.localizedDescription), for: video)
-                append("❌ \(video.name) — \(error.localizedDescription)")
-            }
-        }
-    }
-
-    func checkAll(_ videos: [TestVideo]) {
-        Task {
-            for video in videos {
-                let hit = await VideoCacheManager.shared.isCached(url: video.url)
-                if hit, let localURL = try? await VideoCacheManager.shared.video(from: video.url) {
-                    set(.cached(url: localURL, size: fileSize(at: localURL)), for: video)
-                    append("🎯 CACHED: \(video.name) (\(fileSize(at: localURL)))")
-                } else {
-                    append("💨 NOT CACHED: \(video.name)")
+                let localURL = try await VideoCacheManager.shared.video(from: video.url) { [weak self] p in
+                    Task { @MainActor [weak self] in
+                        self?.set(.downloading(progress: p), for: video)
+                    }
                 }
+                let elapsed = Date().timeIntervalSince(start)
+                let size = fileSize(at: localURL)
+                let source = cacheSource(elapsed: elapsed)
+                set(.cached(url: localURL, size: size, source: source), for: video)
+                append("✅ \(video.name) — \(source.label) in \(String(format: "%.3f", elapsed))s (\(size))")
+                await refreshDiskSize()
+            } catch {
+                set(.idle, for: video)
+                append("❌ \(video.name) — \(error.localizedDescription)")
             }
         }
     }
@@ -125,6 +145,31 @@ final class CacheTestViewModel {
         download(video)
     }
 
+    func checkAll(_ videos: [TestVideo]) {
+        Task {
+            for video in videos {
+                let start = Date()
+                guard let localURL = try? await VideoCacheManager.shared.video(from: video.url) else { continue }
+                let elapsed = Date().timeIntervalSince(start)
+                let size = fileSize(at: localURL)
+                let source = cacheSource(elapsed: elapsed)
+                set(.cached(url: localURL, size: size, source: source), for: video)
+            }
+            await refreshDiskSize()
+        }
+    }
+
+    func clearMemoryCache() {
+        Task { await VideoCacheManager.shared.clearMemoryCache() }
+        append("🧠 Memory cache cleared")
+        // Reset any cached status to disk (still on disk, just not in memory)
+        for (id, status) in statuses {
+            if case .cached(let url, let size, _) = status {
+                statuses[id] = .cached(url: url, size: size, source: .disk)
+            }
+        }
+    }
+
     func clearAll(_ videos: [TestVideo]) {
         Task {
             isClearing = true
@@ -132,14 +177,26 @@ final class CacheTestViewModel {
             do {
                 try await VideoCacheManager.shared.clearCache()
                 for video in videos { statuses[video.id] = nil }
-                append("🗑️ Cache cleared")
+                diskCacheSize = "0 bytes"
+                append("🗑️ All cache cleared (memory + disk)")
             } catch {
                 append("❌ Clear failed: \(error.localizedDescription)")
             }
         }
     }
 
+    func refreshDiskSize() async {
+        let bytes = (try? await VideoCacheManager.shared.diskCacheSize()) ?? 0
+        diskCacheSize = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
     // MARK: - Private
+
+    private func cacheSource(elapsed: TimeInterval) -> CacheSource {
+        if elapsed < 0.005 { return .memory }
+        if elapsed < 0.200 { return .disk }
+        return .network
+    }
 
     private func set(_ status: Status, for video: TestVideo) {
         statuses[video.id] = status
@@ -167,6 +224,18 @@ struct CacheTestView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack {
+                        Label("Disk usage", systemImage: "internaldrive")
+                        Spacer()
+                        Text(vm.diskCacheSize)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                } header: {
+                    Text("Cache Stats")
+                }
+
                 Section("Test Videos") {
                     ForEach(videos) { video in
                         VideoRow(
@@ -197,18 +266,24 @@ struct CacheTestView: View {
             .navigationTitle("Buffalo Cache")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Check All") { vm.checkAll(videos) }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Clear Cache", role: .destructive) { vm.clearAll(videos) }
-                        .disabled(vm.isClearing)
+                    Menu {
+                        Button("Check All") { vm.checkAll(videos) }
+                        Button("Clear Memory Cache") { vm.clearMemoryCache() }
+                        Button("Clear All Cache", role: .destructive) { vm.clearAll(videos) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .disabled(vm.isClearing)
                 }
             }
         }
         .fullScreenCover(item: $playingURL) { item in
             PlayerSheet(url: item.url)
         }
-        .onAppear { vm.checkAll(videos) }
+        .onAppear {
+            vm.checkAll(videos)
+            Task { await vm.refreshDiskSize() }
+        }
     }
 }
 
@@ -235,6 +310,12 @@ struct VideoRow: View {
                     .foregroundStyle(status.color)
             }
 
+            if let p = status.downloadProgress {
+                ProgressView(value: p)
+                    .tint(.orange)
+                    .animation(.linear(duration: 0.1), value: p)
+            }
+
             HStack(spacing: 10) {
                 switch status {
                 case .idle:
@@ -245,13 +326,9 @@ struct VideoRow: View {
                     .controlSize(.small)
 
                 case .downloading:
-                    ProgressView()
-                        .scaleEffect(0.85)
-                    Text("Downloading…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    EmptyView()
 
-                case .cached:
+                case .cached(_, _, let source):
                     Button(action: onRedownload) {
                         Label("Re-download", systemImage: "arrow.clockwise")
                     }
@@ -263,7 +340,11 @@ struct VideoRow: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .tint(.green)
+                    .tint(status.color)
+
+                    Image(systemName: source.icon)
+                        .foregroundStyle(status.color)
+                        .font(.caption)
 
                 case .failed:
                     Button(action: onDownload) {
