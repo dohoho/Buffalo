@@ -2,9 +2,11 @@ import Foundation
 
 actor DiskCache {
     private let directory: URL
+    private let maxBytes: Int  // maximum disk usage in bytes; 0 = unlimited, default 500 MB
 
-    init(directory: URL) throws {
+    init(directory: URL, maxBytes: Int = 500_000_000) throws {
         self.directory = directory
+        self.maxBytes = maxBytes
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -14,12 +16,18 @@ actor DiskCache {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)
+        if maxBytes > 0 {
+            try evictIfNeeded()
+        }
         return destination
     }
 
     func retrieve(forKey key: CacheKey, fileExtension ext: String) -> URL? {
         let url = cachedFileURL(for: key, ext: ext)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        // LRU: bump modification date so this file is treated as recently used during eviction.
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+        return url
     }
 
     func remove(forKey key: CacheKey, fileExtension ext: String) throws {
@@ -37,7 +45,45 @@ actor DiskCache {
         }
     }
 
+    func totalSize() throws -> Int {
+        let keys: Set<URLResourceKey> = [.fileSizeKey]
+        let items = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: Array(keys)
+        )
+        return try items.reduce(0) { sum, url in
+            let size = try url.resourceValues(forKeys: keys).fileSize ?? 0
+            return sum + size
+        }
+    }
+
     private func cachedFileURL(for key: CacheKey, ext: String) -> URL {
         directory.appendingPathComponent(key.value).appendingPathExtension(ext)
+    }
+
+    private func evictIfNeeded() throws {
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+        let items = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: Array(keys)
+        )
+
+        var totalSize = 0
+        var fileInfos: [(url: URL, size: Int, date: Date)] = []
+
+        for item in items {
+            let resources = try item.resourceValues(forKeys: keys)
+            let size = resources.fileSize ?? 0
+            let date = resources.contentModificationDate ?? .distantPast
+            totalSize += size
+            fileInfos.append((url: item, size: size, date: date))
+        }
+
+        guard totalSize > maxBytes else { return }
+
+        // LRU: sort oldest modification date first — evict least recently used files until under limit.
+        for info in fileInfos.sorted(by: { $0.date < $1.date }) {
+            guard totalSize > maxBytes else { break }
+            try FileManager.default.removeItem(at: info.url)
+            totalSize -= info.size
+        }
     }
 }

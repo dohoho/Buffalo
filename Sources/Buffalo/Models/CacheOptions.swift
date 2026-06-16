@@ -7,6 +7,7 @@ public struct CacheOptions: OptionSet, Sendable {
 
     public static let diskCache = CacheOptions(rawValue: 1 << 0)
     public static let forceRefresh = CacheOptions(rawValue: 1 << 1)
+    public static let memoryCache = CacheOptions(rawValue: 1 << 2)
 
-    public static let `default`: CacheOptions = [.diskCache]
+    public static let `default`: CacheOptions = [.diskCache, .memoryCache]
 }

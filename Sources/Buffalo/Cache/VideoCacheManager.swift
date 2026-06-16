@@ -4,6 +4,7 @@ public actor VideoCacheManager {
     public static let shared = VideoCacheManager()
 
     private let diskCache: DiskCache
+    private let memoryCache: MemoryCache
     private let downloadManager: VideoDownloadManager
 
     private init() {
@@ -12,6 +13,7 @@ public actor VideoCacheManager {
             .appendingPathComponent("Buffalo", isDirectory: true)
         // Safe: Caches directory always exists on all Apple platforms.
         diskCache = try! DiskCache(directory: dir)
+        memoryCache = MemoryCache()
         downloadManager = VideoDownloadManager(
             downloader: VideoDownloadTask(),
             diskCache: diskCache
@@ -21,9 +23,12 @@ public actor VideoCacheManager {
     init(
         directory: URL,
         downloader: any VideoDownloading = VideoDownloadTask(),
-        maxConcurrent: Int = 4
+        maxConcurrent: Int = 4,
+        memoryCacheCountLimit: Int = 20,
+        diskCacheMaxBytes: Int = 500_000_000
     ) throws {
-        diskCache = try DiskCache(directory: directory)
+        diskCache = try DiskCache(directory: directory, maxBytes: diskCacheMaxBytes)
+        memoryCache = MemoryCache(countLimit: memoryCacheCountLimit)
         downloadManager = VideoDownloadManager(
             maxConcurrent: maxConcurrent,
             downloader: downloader,
@@ -41,17 +46,30 @@ public actor VideoCacheManager {
         let key = CacheKey(url: url)
         let ext = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
 
-        if !options.contains(.forceRefresh),
-           let cached = await diskCache.retrieve(forKey: key, fileExtension: ext) {
-            return cached
+        if !options.contains(.forceRefresh) {
+            if options.contains(.memoryCache), let cached = memoryCache.retrieve(forKey: key) {
+                return cached
+            }
+            if let cached = await diskCache.retrieve(forKey: key, fileExtension: ext) {
+                if options.contains(.memoryCache) {
+                    memoryCache.store(url: cached, forKey: key)
+                }
+                return cached
+            }
         }
 
-        return try await downloadManager.fetch(
+        let result = try await downloadManager.fetch(
             key: key,
             url: url,
             fileExtension: ext,
             progress: progress
         )
+
+        if options.contains(.memoryCache) {
+            memoryCache.store(url: result, forKey: key)
+        }
+
+        return result
     }
 
     public func cancel(url: URL) async {
@@ -65,11 +83,25 @@ public actor VideoCacheManager {
 
     public func isCached(url: URL) async -> Bool {
         let key = CacheKey(url: url)
+        if memoryCache.retrieve(forKey: key) != nil { return true }
         let ext = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
         return await diskCache.retrieve(forKey: key, fileExtension: ext) != nil
     }
 
-    public func clearCache() async throws {
+    public func clearMemoryCache() {
+        memoryCache.removeAll()
+    }
+
+    public func clearDiskCache() async throws {
         try await diskCache.clearAll()
+        memoryCache.removeAll()
+    }
+
+    public func clearCache() async throws {
+        try await clearDiskCache()
+    }
+
+    public func diskCacheSize() async throws -> Int {
+        try await diskCache.totalSize()
     }
 }
