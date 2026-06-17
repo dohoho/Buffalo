@@ -6,6 +6,7 @@ public actor VideoCacheManager {
     private let diskCache: DiskCache
     private let memoryCache: MemoryCache
     private let downloadManager: VideoDownloadManager
+    public private(set) var diskCacheConfig: DiskCacheConfig
 
     private init() {
         let dir = FileManager.default
@@ -18,6 +19,7 @@ public actor VideoCacheManager {
             downloader: VideoDownloadTask(),
             diskCache: diskCache
         )
+        diskCacheConfig = DiskCacheConfig()
     }
 
     init(
@@ -34,14 +36,12 @@ public actor VideoCacheManager {
             downloader: downloader,
             diskCache: diskCache
         )
+        self.diskCacheConfig = diskCacheConfig
     }
 
-    public var diskCacheConfig: DiskCacheConfig {
-        get async { await diskCache.config }
-    }
-
-    public func configure(diskCache config: DiskCacheConfig) async {
-        await diskCache.updateConfig(config)
+    public func configure(diskCache config: DiskCacheConfig) {
+        diskCacheConfig = config
+        Task { await diskCache.updateConfig(config) }
     }
 
     /// Returns a local file URL for the video, downloading it if not already cached.
