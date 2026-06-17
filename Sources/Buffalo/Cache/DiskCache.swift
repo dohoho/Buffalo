@@ -2,12 +2,16 @@ import Foundation
 
 actor DiskCache {
     private let directory: URL
-    private let maxBytes: Int  // maximum disk usage in bytes; 0 = unlimited, default 500 MB
+    var config: DiskCacheConfig
 
-    init(directory: URL, maxBytes: Int = 500_000_000) throws {
+    init(directory: URL, config: DiskCacheConfig = DiskCacheConfig()) throws {
         self.directory = directory
-        self.maxBytes = maxBytes
+        self.config = config
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    func updateConfig(_ config: DiskCacheConfig) {
+        self.config = config
     }
 
     func store(movingFrom tempURL: URL, forKey key: CacheKey, fileExtension ext: String) throws -> URL {
@@ -16,7 +20,7 @@ actor DiskCache {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)
-        if maxBytes > 0 {
+        if config.sizeLimit > 0 {
             try evictIfNeeded()
         }
         return destination
@@ -77,11 +81,11 @@ actor DiskCache {
             fileInfos.append((url: item, size: size, date: date))
         }
 
-        guard totalSize > maxBytes else { return }
+        guard totalSize > config.sizeLimit else { return }
 
         // LRU: sort oldest modification date first — evict least recently used files until under limit.
         for info in fileInfos.sorted(by: { $0.date < $1.date }) {
-            guard totalSize > maxBytes else { break }
+            guard totalSize > config.sizeLimit else { break }
             try FileManager.default.removeItem(at: info.url)
             totalSize -= info.size
         }

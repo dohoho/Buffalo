@@ -25,15 +25,23 @@ public actor VideoCacheManager {
         downloader: any VideoDownloading = VideoDownloadTask(),
         maxConcurrent: Int = 4,
         memoryCacheCountLimit: Int = 20,
-        diskCacheMaxBytes: Int = 500_000_000
+        diskCacheConfig: DiskCacheConfig = DiskCacheConfig()
     ) throws {
-        diskCache = try DiskCache(directory: directory, maxBytes: diskCacheMaxBytes)
+        diskCache = try DiskCache(directory: directory, config: diskCacheConfig)
         memoryCache = MemoryCache(countLimit: memoryCacheCountLimit)
         downloadManager = VideoDownloadManager(
             maxConcurrent: maxConcurrent,
             downloader: downloader,
             diskCache: diskCache
         )
+    }
+
+    public var diskCacheConfig: DiskCacheConfig {
+        get async { await diskCache.config }
+    }
+
+    public func configure(diskCache config: DiskCacheConfig) async {
+        await diskCache.updateConfig(config)
     }
 
     /// Returns a local file URL for the video, downloading it if not already cached.
