@@ -91,4 +91,80 @@ struct DiskCacheTests {
         let retrieved = await cache.retrieve(forKey: key, fileExtension: "mp4")
         #expect(retrieved == nil)
     }
+
+    // MARK: - DiskCacheConfig
+
+    @Test func defaultSizeLimitIs500MB() async throws {
+        let (cache, cacheDir) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+
+        let config = await cache.config
+        #expect(config.sizeLimit == 500_000_000)
+    }
+
+    @Test func updateConfigChangesSizeLimit() async throws {
+        let (cache, cacheDir) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+
+        await cache.updateConfig(DiskCacheConfig(sizeLimit: 2_000_000_000))
+
+        let config = await cache.config
+        #expect(config.sizeLimit == 2_000_000_000)
+    }
+
+    @Test func evictsOldestFileWhenOverSizeLimit() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EvictTest-\(Int.random(in: 0..<Int.max))")
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EvictSrc-\(Int.random(in: 0..<Int.max))")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+        // Limit: 80 bytes; each file: 50 bytes → second store triggers eviction of the first.
+        let cache = try DiskCache(directory: dir, config: DiskCacheConfig(sizeLimit: 80))
+
+        let keyA = CacheKey(url: URL(string: "https://example.com/a.mp4")!)
+        let keyB = CacheKey(url: URL(string: "https://example.com/b.mp4")!)
+
+        let fileA = tmpDir.appendingPathComponent("a.mp4")
+        try Data(repeating: 0, count: 50).write(to: fileA)
+        let storedA = try await cache.store(movingFrom: fileA, forKey: keyA, fileExtension: "mp4")
+
+        // Mark A as older so LRU eviction picks it first.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -60)],
+            ofItemAtPath: storedA.path
+        )
+
+        let fileB = tmpDir.appendingPathComponent("b.mp4")
+        try Data(repeating: 0, count: 50).write(to: fileB)
+        _ = try await cache.store(movingFrom: fileB, forKey: keyB, fileExtension: "mp4")
+
+        #expect(await cache.retrieve(forKey: keyA, fileExtension: "mp4") == nil)
+        #expect(await cache.retrieve(forKey: keyB, fileExtension: "mp4") != nil)
+    }
+
+    @Test func noEvictionWhenSizeLimitIsZero() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UnlimitedTest-\(Int.random(in: 0..<Int.max))")
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UnlimitedSrc-\(Int.random(in: 0..<Int.max))")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+        let cache = try DiskCache(directory: dir, config: DiskCacheConfig(sizeLimit: 0))
+
+        let keys = (0..<5).map { CacheKey(url: URL(string: "https://example.com/v\($0).mp4")!) }
+        for (i, key) in keys.enumerated() {
+            let file = tmpDir.appendingPathComponent("v\(i).mp4")
+            try Data(repeating: UInt8(i), count: 100).write(to: file)
+            _ = try await cache.store(movingFrom: file, forKey: key, fileExtension: "mp4")
+        }
+
+        for key in keys {
+            #expect(await cache.retrieve(forKey: key, fileExtension: "mp4") != nil)
+        }
+    }
 }

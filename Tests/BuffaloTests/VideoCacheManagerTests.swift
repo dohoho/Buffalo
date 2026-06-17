@@ -95,4 +95,46 @@ struct VideoCacheManagerTests {
 
         #expect(await manager.isCached(url: url) == false)
     }
+
+    // MARK: - DiskCacheConfig
+
+    @Test func diskCacheConfigReturnsDefault() async throws {
+        let (manager, _, cacheDir, tempDir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = await manager.diskCacheConfig
+        #expect(config.sizeLimit == 500_000_000)
+    }
+
+    @Test func configureDiskCacheUpdatesConfig() async throws {
+        let (manager, _, cacheDir, tempDir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        await manager.configure(diskCache: DiskCacheConfig(sizeLimit: 1_000_000_000))
+
+        let config = await manager.diskCacheConfig
+        #expect(config.sizeLimit == 1_000_000_000)
+    }
+
+    @Test func customDiskCacheConfigIsAppliedAtInit() async throws {
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BufCache-\(Int.random(in: 0..<Int.max))")
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BufTemp-\(Int.random(in: 0..<Int.max))")
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let mock = MockDownloader(tempDir: tempDir)
+        let manager = try VideoCacheManager(
+            directory: cacheDir,
+            downloader: mock,
+            diskCacheConfig: DiskCacheConfig(sizeLimit: 0)
+        )
+
+        let config = await manager.diskCacheConfig
+        #expect(config.sizeLimit == 0)
+    }
 }
